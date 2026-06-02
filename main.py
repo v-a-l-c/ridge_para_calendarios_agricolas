@@ -1,103 +1,54 @@
-import pandas as pd
 import numpy as np
+import pandas as pd
+from datetime import timedelta
+from sklearn.preprocessing import StandardScaler
+from sklearn.kernel_ridge import KernelRidge
+from sklearn.svm import SVR
+from sklearn.metrics import mean_absolute_error, mean_squared_error
 
+
+# Cargamos el histórico climático
 df = pd.read_csv("clima.csv")
-
 df["FECHA"] = pd.to_datetime(df["FECHA"])
 
-print(df.head())
 
-df["TMIN"] = pd.to_numeric(df["TMIN"], errors='coerce')
-df["EVAP"] = pd.to_numeric(df["EVAP"], errors='coerce')
-df["PRECIP"] = pd.to_numeric(df["PRECIP"], errors='coerce')
-
-
-
+# Aseguramos que las variables críticas sean numéricas
+cols_numericas = ["TMIN", "TMAX", "EVAP", "PRECIP"]
+for col in cols_numericas:
+    if col in df.columns:
+        df[col] = pd.to_numeric(df[col], errors='coerce')
 
 
+# Definimos de umbrales y etiquetas de riesgo (Clasificación binaria implícita)
+df["HELADA"] = (df["TMIN"] <= 0).astype(int)
 
-df["HELADA"] = (
-    df["TMIN"] <= 0
-).astype(int)
-
-
+# Sequía basada en el percentil 30 mensual de precipitación
 df["MES"] = df["FECHA"].dt.month
 umbral_sequia = df.groupby("MES")["PRECIP"].transform(lambda x: x.quantile(0.3))
 df["SEQUIA"] = (df["PRECIP"] < umbral_sequia).astype(int)
 
-"""
-df["SEQUIA"] = (
-    df["EVAP"] > 1.5 * df["PRECIP"]
-).astype(int)
-
-umbral_inundacion = (
-    df["PRECIP"]
-    .quantile(0.90)
-)
-"""
+# Inundación basada en el percentil 90 global de precipitación
+umbral_inundacion = df["PRECIP"].quantile(0.90)
+df["INUNDACION"] = (df["PRECIP"] > umbral_inundacion).astype(int)
 
 
+# Target lógico: 1 si ocurre al menos un evento adverso, 0 si es seguro
+df["RIESGO"] = ((df["HELADA"] == 1) | (df["SEQUIA"] == 1) | (df["INUNDACION"] == 1)).astype(int)
 
-umbral_inundacion = (
-    df["PRECIP"]
-    .quantile(0.90)
-)
-
-
-
-df["INUNDACION"] = (
-    df["PRECIP"] > umbral_inundacion
-).astype(int)
-
-df["RIESGO"] = (
-    (df["HELADA"] == 1)
-    |
-    (df["SEQUIA"] == 1)
-    |
-    (df["INUNDACION"] == 1)
-).astype(int)
-
-
-
-
-
-
-
-
-
-
-
-
-
+# Variables de ciclicidad temporal (Transformación del día del año)
 df["DIA_AÑO"] = df["FECHA"].dt.dayofyear
-
-
-
-
 df["dia_sin"] = np.sin(2 * np.pi * df["DIA_AÑO"] / 365)
 df["dia_cos"] = np.cos(2 * np.pi * df["DIA_AÑO"] / 365)
 
+# Creación de variables rezagadas (Lag features de 1 día de desfase)
+for col in cols_numericas:
+    df[f"{col}_lag1"] = df[col].shift(1)
 
-df["PRECIP_lag1"] = (
-    df["PRECIP"].shift(1)
-)
-
-df["TMAX_lag1"] = (
-    df["TMAX"].shift(1)
-)
-
-df["TMIN_lag1"] = (
-    df["TMIN"].shift(1)
-)
-
-df["EVAP_lag1"] = (
-    df["EVAP"].shift(1)
-)
-
-df = df.dropna()
+# Eliminar filas con nulos resultantes de los rezagos o conversiones
+df = df.dropna().reset_index(drop=True)
 
 
-
+####---------------DIVISIÓN Y ESCALADO DE DATOS--------------------------------
 
 features = [
     "PRECIP",
@@ -117,235 +68,94 @@ y = df["RIESGO"]
 
 
 
-
-
-
-
-
-
-
+# Split secuencial (80% entrenamiento, 20% test) para no romper el orden temporal
 split = int(len(df) * 0.8)
+X_train, X_test = X.iloc[:split], X.iloc[split:]
+y_train, y_test = y.iloc[:split], y.iloc[split:]
 
-X_train = X.iloc[:split]
-X_test = X.iloc[split:]
-
-y_train = y.iloc[:split]
-y_test = y.iloc[split:]
-
-
-
-####--------------------NORMALIZACIÓN----------------------------
-from sklearn.preprocessing import StandardScaler
-
+# Normalización de variables numéricas
 scaler = StandardScaler()
-
-X_train = scaler.fit_transform(
-    X_train
-)
-
-X_test = scaler.transform(
-    X_test
-)
+X_train_scaled = scaler.fit_transform(X_train)
+X_test_scaled = scaler.transform(X_test)
 
 
-####---------------KERNEL LINEAL--------------------------------
+####---------------ENTRENAMIENTO DE MODELOS--------------------------------
+
+# --- Kernel Ridge Regression ---
+krr_lineal = KernelRidge(alpha=1.0, kernel="linear")
+krr_lineal.fit(X_train_scaled, y_train)
+pred_krr_lineal = krr_lineal.predict(X_test_scaled)
+
+krr_rbf = KernelRidge(alpha=1.0, kernel="rbf", gamma=0.1)
+krr_rbf.fit(X_train_scaled, y_train)
+pred_krr_rbf = krr_rbf.predict(X_test_scaled)
 
 
-from sklearn.kernel_ridge import KernelRidge
 
-modelo_lineal = KernelRidge(
-    alpha=1.0,
-    kernel="linear"
-)
+# --- Support Vector Regression ---
+svr_lineal = SVR(kernel="linear", C=1.0, epsilon=0.1)
+svr_lineal.fit(X_train_scaled, y_train)
+pred_svr_lineal = svr_lineal.predict(X_test_scaled)
 
-modelo_lineal.fit(
-    X_train,
-    y_train
-)
+svr_rbf = SVR(kernel="rbf", C=1.0, gamma=0.1, epsilon=0.1)
+svr_rbf.fit(X_train_scaled, y_train)
+pred_svr_rbf = svr_rbf.predict(X_test_scaled)
 
-pred_lineal = (
-    modelo_lineal
-    .predict(X_test)
-)
-
-pred_lineal = (
-    pred_lineal > 0.5
-).astype(int)
-
-
-####---------------------KERNEL NO LINEAL----------------
-
-
-modelo_rbf = KernelRidge(
-    alpha=1.0,
-    kernel="rbf",
-    gamma=0.1
-)
-
-modelo_rbf.fit(
-    X_train,
-    y_train
-)
-
-pred_rbf = (
-    modelo_rbf
-    .predict(X_test)
-)
-
-pred_rbf = (
-    pred_rbf > 0.5
-).astype(int)
 
 ####----------------------EVALUACIÓN-----------------------
 
 
 
-from sklearn.metrics import accuracy_score
+def evaluar_modelo(nombre, y_real, y_pred):
+    mae = mean_absolute_error(y_real, y_pred)
+    rmse = np.sqrt(mean_squared_error(y_real, y_pred))
+    print(f"{nombre:15} | MAE: {mae:.4f} | RMSE: {rmse:.4f}")
 
-print("Kernel lineal:")
-print(
-    accuracy_score(
-        y_test,
-        pred_lineal
-    )
-)
-
-print("Kernel RBF:")
-print(
-    accuracy_score(
-        y_test,
-        pred_rbf
-    )
-)
+print("\n Evaluación de modelos:")
+evaluar_modelo("KRR Lineal", y_test, pred_krr_lineal)
+evaluar_modelo("KRR RBF", y_test, pred_krr_rbf)
+evaluar_modelo("SVR Lineal", y_test, pred_svr_lineal)
+evaluar_modelo("SVR RBF", y_test, pred_svr_rbf)
 
 
+###-----------SELECCIÓN DE FECHAS------------------------
 
+# Usamos el modelo KRR RBF para calcular el Score de Riesgo global
+X_all_scaled = scaler.transform(df[features])
+df["RIESGO_SCORE"] = krr_rbf.predict(X_all_scaled)
 
-print(df["HELADA"].mean())
-print(df["SEQUIA"].mean())
-print(df["INUNDACION"].mean())
-
-
-from sklearn.metrics import confusion_matrix
-from sklearn.metrics import classification_report
-
-print(confusion_matrix(y_test, pred_lineal))
-print(confusion_matrix(y_test, pred_rbf))
-
-print(classification_report(y_test, pred_lineal))
-print(classification_report(y_test, pred_rbf))
-
-
-
-
-####---------------ELEGIR FECHA
-
-X_scaled = scaler.transform(
-    df[features]
-)
-
-df["RIESGO_SCORE"] = (
-    modelo_rbf.predict(X_scaled)
-)
-
-riesgo = modelo_rbf.predict(X_scaled)
-
-
-
-#FECHA segura cercana
-
-
-from datetime import timedelta
-
-def fecha_optima(
-    fecha_objetivo,
-    ventana_dias=20
-):
-
-    fecha_objetivo = pd.to_datetime(
-        fecha_objetivo
-    )
-
-    inicio = (
-        fecha_objetivo
-        - timedelta(days=ventana_dias)
-    )
-
-    fin = (
-        fecha_objetivo
-        + timedelta(days=ventana_dias)
-    )
-
-    candidatos = df[
-        (df["FECHA"] >= inicio)
-        &
-        (df["FECHA"] <= fin)
-    ].copy()
-
-    # distancia temporal
-    candidatos["DISTANCIA"] = (
-        candidatos["FECHA"]
-        - fecha_objetivo
-    ).abs().dt.days
-
-    # ordenar:
-    candidatos = candidatos.sort_values(
-        by=[
-            "RIESGO_SCORE",
-            "DISTANCIA"
-        ]
-    )
-
+def obtener_fecha_optima(fecha_objetivo, ventana_dias=20):
+    fecha_obj = pd.to_datetime(fecha_objetivo)
+    inicio = fecha_obj - timedelta(days=ventana_dias)
+    fin = fecha_obj + timedelta(days=ventana_dias)
+    
+    candidatos = df[(df["FECHA"] >= inicio) & (df["FECHA"] <= fin)].copy()
+    
+    if candidatos.empty:
+        return "No hay datos para el rango seleccionado."
+        
+    # Calcular penalización por distancia en días a la fecha deseada
+    candidatos["DISTANCIA"] = (candidatos["FECHA"] - fecha_obj).abs().dt.days
+    
+    # Priorizar menor score de riesgo; a igual score, la fecha más cercana
+    candidatos = candidatos.sort_values(by=["RIESGO_SCORE", "DISTANCIA"])
     return candidatos.iloc[0]
 
+def mejor_fecha_intervalo(fecha_inicio, fecha_fin):
+    """Encuentra la fecha con menor riesgo absoluto dentro de un rango dado."""
+    inicio, fin = pd.to_datetime(fecha_inicio), pd.to_datetime(fecha_fin)
+    candidatos = df[(df["FECHA"] >= inicio) & (df["FECHA"] <= fin)]
+    
+    if candidatos.empty:
+        return "No hay datos para el intervalo seleccionado."
+        
+    mejor_idx = candidatos["RIESGO_SCORE"].idxmin()
+    return candidatos.loc[mejor_idx]
 
-#UNA FECHA
-mejor = fecha_optima(
-    "2024-06-24",
-    ventana_dias=20
-)
+print("\nOPTIMIZACIÓN DE FECHA INDIVIDUAL:")
+mejor_individual = obtener_fecha_optima("2024-06-24", ventana_dias=20)
+print(mejor_individual[["FECHA", "RIESGO_SCORE", "PRECIP", "TMAX", "TMIN"]])
 
-print(mejor[
-    [
-        "FECHA",
-        "RIESGO_SCORE",
-        "PRECIP",
-        "TMAX",
-        "TMIN"
-    ]
-])
-
-#INTERVALO
-def mejor_fecha_intervalo(
-    fecha_inicio,
-    fecha_fin
-):
-
-    inicio = pd.to_datetime(
-        fecha_inicio
-    )
-
-    fin = pd.to_datetime(
-        fecha_fin
-    )
-
-    candidatos = df[
-        (df["FECHA"] >= inicio)
-        &
-        (df["FECHA"] <= fin)
-    ]
-
-    mejor = candidatos.loc[
-        candidatos[
-            "RIESGO_SCORE"
-        ].idxmin()
-    ]
-
-    return mejor
-
-resultado = mejor_fecha_intervalo(
-    "2025-04-03",
-    "2025-04-15"
-)
-
-print(resultado)
+print("\nOPTIMIZACIÓN POR INTERVALO:")
+mejor_intervalo = mejor_fecha_intervalo("2025-04-03", "2025-04-15")
+print(mejor_intervalo[["FECHA", "RIESGO_SCORE", "PRECIP", "TMAX", "TMIN"]])
